@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use bevy_fps_counter::FpsCounterPlugin;
-use bevy_rapier3d::prelude::*;
 use urdf_rs::{Geometry, Visual};
 
 mod world;
@@ -14,7 +13,6 @@ fn main() {
         .add_plugins((
             DefaultPlugins,
             bevy_stl::StlPlugin,
-            RapierPhysicsPlugin::<NoUserData>::default(),
             FpsCounterPlugin,
             WorldPlugin,
             CameraPlugin,

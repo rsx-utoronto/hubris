@@ -1,6 +1,5 @@
 use bevy::color;
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::*;
 
 pub struct WorldPlugin;
 
@@ -45,6 +44,5 @@ fn spawn_floor(
                 )),
                 ..Default::default()
             });
-            parent.spawn((Collider::cylinder(0.1, 100.0),));
         });
 }
