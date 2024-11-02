@@ -8,8 +8,8 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(NoCameraPlayerPlugin)
             .insert_resource(MovementSettings {
-                sensitivity: 0.00013,
-                speed: 50.0,
+                sensitivity: 0.0002,
+                speed: 2.0,
             })
             .add_systems(Startup, spawn_camera);
     }

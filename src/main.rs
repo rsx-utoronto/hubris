@@ -78,12 +78,30 @@ fn spawn_robot(
 
 fn urdf_to_transform(visual: &Visual) -> Transform {
     let origin = visual.origin.clone();
-    let pos = origin.xyz;
+    let mut pos = origin.xyz;
     let rot = origin.rpy;
+
+    let mut scale = Vec3::ONE;
+
+    if let Geometry::Mesh {
+        scale: Some(mesh_scale),
+        ..
+    } = &visual.geometry
+    {
+        scale = Vec3::new(
+            mesh_scale[0] as f32,
+            mesh_scale[1] as f32,
+            mesh_scale[2] as f32,
+        );
+
+        pos[0] *= mesh_scale[0];
+        pos[1] *= mesh_scale[1];
+        pos[2] *= mesh_scale[2];
+    }
 
     Transform {
         translation: Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32),
         rotation: Quat::from_euler(EulerRot::XYZ, rot[0] as f32, rot[1] as f32, rot[2] as f32),
-        ..Default::default()
+        scale,
     }
 }
