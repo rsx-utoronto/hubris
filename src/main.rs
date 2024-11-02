@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_fps_counter::FpsCounterPlugin;
 use bevy_rapier3d::prelude::*;
-use urdf_rs::{Geometry, Robot, Visual};
+use urdf_rs::{Geometry, Visual};
 
 mod world;
 use world::WorldPlugin;
@@ -9,15 +9,7 @@ use world::WorldPlugin;
 mod camera;
 use camera::CameraPlugin;
 
-#[derive(Debug, Resource)]
-struct RobotResource {
-    robot: Robot,
-}
-
 fn main() {
-    let urdf_path = "sample_description/urdf/low_cost_robot.urdf";
-    let urdf_robot = urdf_rs::read_file(urdf_path).unwrap();
-
     App::new()
         .add_plugins((
             DefaultPlugins,
@@ -27,18 +19,33 @@ fn main() {
             WorldPlugin,
             CameraPlugin,
         ))
-        .insert_resource(RobotResource { robot: urdf_robot })
-        .add_systems(Startup, spawn_robot)
+        .add_systems(Startup, spawn_robots)
         .run();
 }
 
-fn spawn_robot(
+fn spawn_robots(
     mut commands: Commands,
-    urdf_robot: Res<RobotResource>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for link in &urdf_robot.robot.links {
+    spawn_robot(
+        &mut commands,
+        &asset_server,
+        &mut materials,
+        Transform::from_xyz(0.0, 0.3, 0.0),
+    );
+}
+
+fn spawn_robot(
+    commands: &mut Commands,
+    asset_server: &Res<AssetServer>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    base_transform: Transform,
+) {
+    let urdf_path = "sample_description/urdf/low_cost_robot.urdf";
+    let robot = urdf_rs::read_file(urdf_path).unwrap();
+
+    for link in &robot.links {
         for visual in &link.visual {
             let mut mesh = PbrBundle::default().mesh;
 
@@ -67,7 +74,7 @@ fn spawn_robot(
             let link_pbr = PbrBundle {
                 mesh,
                 material: material_handle,
-                transform: urdf_to_transform(visual),
+                transform: base_transform * urdf_to_transform(visual),
                 ..Default::default()
             };
 
