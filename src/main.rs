@@ -43,6 +43,7 @@ struct RobotPart;
 
 #[derive(Component)]
 struct UrdfVisual {
+    link_name: String,
     geometry: Geometry,
     material: Option<urdf_rs::Material>,
     origin: Pose,
@@ -50,6 +51,7 @@ struct UrdfVisual {
 
 #[derive(Component)]
 struct URDFCollision {
+    link_name: String,
     geometry: Geometry,
     origin: Pose,
 }
@@ -62,25 +64,18 @@ struct JointComponent {
     current_position: f32,
 }
 
-fn spawn_robots(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn spawn_robots(mut commands: Commands) {
     spawn_robot(
         &mut commands,
-        &asset_server,
-        &mut materials,
-        Transform::from_xyz(0.0, 0.3, 0.0),
+        Transform {
+            translation: Vec3::new(0.0, 0.0, 0.0),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        },
     );
 }
 
-fn spawn_robot(
-    commands: &mut Commands,
-    _asset_server: &Res<AssetServer>,
-    _materials: &mut ResMut<Assets<StandardMaterial>>,
-    base_transform: Transform,
-) {
+fn spawn_robot(commands: &mut Commands, base_transform: Transform) {
     let urdf_path = "sample_description/urdf/low_cost_robot.urdf";
     let robot = urdf_rs::read_file(urdf_path).expect("Failed to read URDF file");
 
@@ -127,7 +122,6 @@ fn spawn_robot(
             .id();
 
         commands.entity(joint_entity).add_child(*child_entity);
-
         commands.entity(*parent_entity).add_child(joint_entity);
     }
 
@@ -138,44 +132,36 @@ fn spawn_robot(
         .spawn((
             Robot,
             Name::new(robot.name.clone()),
-            TransformBundle::from_transform(base_transform),
+            TransformBundle::from_transform(Transform::IDENTITY),
             VisibilityBundle::default(),
         ))
         .add_child(*root_link_entity);
+
+    commands
+        .entity(*root_link_entity)
+        .insert(TransformBundle::from_transform(base_transform));
 
     for link in &robot.links {
         let link_entity = link_entities.get(&link.name).unwrap();
 
         for visual in &link.visual {
-            let visual_transform =
-                urdf_to_transform(&visual.origin, &Some(visual.geometry.clone()));
-
             commands.entity(*link_entity).with_children(|parent| {
-                parent.spawn((
-                    UrdfVisual {
-                        geometry: visual.geometry.clone(),
-                        material: visual.material.clone(),
-                        origin: visual.origin.clone(),
-                    },
-                    TransformBundle::from_transform(visual_transform),
-                    VisibilityBundle::default(),
-                ));
+                parent.spawn((UrdfVisual {
+                    link_name: link.name.clone(),
+                    geometry: visual.geometry.clone(),
+                    material: visual.material.clone(),
+                    origin: visual.origin.clone(),
+                },));
             });
         }
 
         for collision in &link.collision {
-            let collision_transform =
-                urdf_to_transform(&collision.origin, &Some(collision.geometry.clone()));
-
             commands.entity(*link_entity).with_children(|parent| {
-                parent.spawn((
-                    URDFCollision {
-                        geometry: collision.geometry.clone(),
-                        origin: collision.origin.clone(),
-                    },
-                    TransformBundle::from_transform(collision_transform),
-                    VisibilityBundle::default(),
-                ));
+                parent.spawn((URDFCollision {
+                    link_name: link.name.clone(),
+                    geometry: collision.geometry.clone(),
+                    origin: collision.origin.clone(),
+                },));
             });
         }
     }
@@ -241,8 +227,8 @@ fn process_urdf_collisions(
     query: Query<(Entity, &URDFCollision), Added<URDFCollision>>,
     asset_server: Res<AssetServer>,
 ) {
-    for (entity, urdf_visual) in query.iter() {
-        let mesh_handle = match &urdf_visual.geometry {
+    for (entity, urdf_collision) in query.iter() {
+        let mesh_handle = match &urdf_collision.geometry {
             Geometry::Mesh { filename, .. } => asset_server.load(filename),
             Geometry::Box { size } => {
                 let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
@@ -267,13 +253,17 @@ fn process_urdf_collisions(
             }
         };
 
-        let transform = urdf_to_transform(&urdf_visual.origin, &Some(urdf_visual.geometry.clone()));
+        let transform = urdf_to_transform(
+            &urdf_collision.origin,
+            &Some(urdf_collision.geometry.clone()),
+        );
+        let body_type = match urdf_collision.link_name.as_str() {
+            "base_link" => RigidBody::Static,
+            _ => RigidBody::Kinematic,
+        };
 
         commands.entity(entity).insert((
-            (
-                ColliderConstructor::ConvexDecompositionFromMesh,
-                RigidBody::Static,
-            ),
+            (ColliderConstructor::ConvexDecompositionFromMesh, body_type),
             mesh_handle,
             transform,
         ));
