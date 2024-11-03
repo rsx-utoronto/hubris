@@ -1,5 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy_egui::{EguiContexts, EguiPlugin};
 use bevy_fps_counter::FpsCounterPlugin;
 use std::collections::HashMap;
 use urdf_rs::{Geometry, Pose};
@@ -20,6 +21,7 @@ fn main() {
             CameraPlugin,
             PhysicsPlugins::default(),
             PhysicsDebugPlugin::default(),
+            EguiPlugin,
         ))
         .add_systems(
             Startup,
@@ -29,6 +31,7 @@ fn main() {
             )
                 .chain(),
         )
+        .add_systems(Update, joint_control_ui)
         .run();
 }
 
@@ -326,4 +329,58 @@ fn urdf_to_transform(origin: &Pose, geometry: &Option<Geometry>) -> Transform {
         rotation: Quat::from_euler(EulerRot::XYZ, rot[0] as f32, rot[1] as f32, rot[2] as f32),
         scale,
     }
+}
+
+fn joint_control_ui(
+    mut contexts: EguiContexts,
+    mut query: Query<(&mut JointComponent, &mut Transform)>,
+) {
+    use bevy_egui::egui::{self, Slider};
+
+    egui::Window::new("Joint Control").show(contexts.ctx_mut(), |ui| {
+        for (mut joint_component, mut transform) in query.iter_mut() {
+            ui.label(&joint_component.name);
+
+            let mut position = joint_component.current_position;
+
+            if joint_component.joint_type == urdf_rs::JointType::Revolute
+                || joint_component.joint_type == urdf_rs::JointType::Continuous
+            {
+                let response = ui.add(
+                    Slider::new(&mut position, -std::f32::consts::PI..=std::f32::consts::PI)
+                        .text("Angle"),
+                );
+                if response.changed() {
+                    joint_component.current_position = position;
+
+                    let axis = Vec3::new(
+                        joint_component.axis[0] as f32,
+                        joint_component.axis[1] as f32,
+                        joint_component.axis[2] as f32,
+                    );
+
+                    let rotation = Quat::from_axis_angle(axis.normalize(), position);
+
+                    transform.rotation = rotation;
+                }
+            } else if joint_component.joint_type == urdf_rs::JointType::Prismatic {
+                let response = ui.add(Slider::new(&mut position, -1.0..=1.0).text("Position"));
+                if response.changed() {
+                    joint_component.current_position = position;
+
+                    let axis = Vec3::new(
+                        joint_component.axis[0] as f32,
+                        joint_component.axis[1] as f32,
+                        joint_component.axis[2] as f32,
+                    );
+
+                    let translation = axis.normalize() * position;
+
+                    transform.translation = translation;
+                }
+            } else {
+                ui.label("Unsupported joint type");
+            }
+        }
+    });
 }
