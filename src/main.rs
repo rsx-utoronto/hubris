@@ -1,6 +1,8 @@
 use bevy::prelude::*;
+use bevy_egui::{EguiContexts, EguiPlugin};
 use bevy_fps_counter::FpsCounterPlugin;
 use bevy_rapier3d::prelude::*;
+use std::collections::HashMap;
 use urdf_rs::{Geometry, Pose};
 
 mod world;
@@ -19,6 +21,7 @@ fn main() {
             CameraPlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
             RapierDebugRenderPlugin::default(),
+            EguiPlugin,
         ))
         .add_systems(
             Startup,
@@ -28,6 +31,7 @@ fn main() {
             )
                 .chain(),
         )
+        .add_systems(Update, joint_control_ui)
         .run();
 }
 
@@ -48,6 +52,14 @@ struct UrdfVisual {
 struct URDFCollision {
     geometry: Geometry,
     origin: Pose,
+}
+
+#[derive(Component)]
+struct JointComponent {
+    name: String,
+    joint_type: urdf_rs::JointType,
+    axis: [f64; 3],
+    current_position: f32,
 }
 
 fn spawn_robots(
@@ -72,39 +84,118 @@ fn spawn_robot(
     let urdf_path = "sample_description/urdf/low_cost_robot.urdf";
     let robot = urdf_rs::read_file(urdf_path).expect("Failed to read URDF file");
 
+    let mut link_entities = HashMap::new();
+
+    for link in &robot.links {
+        let entity = commands
+            .spawn((
+                RobotPart,
+                Name::new(link.name.clone()),
+                TransformBundle::default(),
+                RigidBody::Dynamic,
+            ))
+            .id();
+
+        link_entities.insert(link.name.clone(), entity);
+    }
+
+    for joint in &robot.joints {
+        let parent_link_name = &joint.parent.link;
+        let child_link_name = &joint.child.link;
+
+        let parent_entity = *link_entities.get(parent_link_name).unwrap();
+        let child_entity = *link_entities.get(child_link_name).unwrap();
+
+        let joint_origin_transform = urdf_to_transform(&joint.origin, &None);
+
+        commands.entity(child_entity).insert((
+            JointComponent {
+                name: joint.name.clone(),
+                joint_type: joint.joint_type.clone(),
+                axis: *joint.axis.xyz,
+                current_position: 0.0,
+            },
+            TransformBundle::from_transform(joint_origin_transform),
+        ));
+
+        match joint.joint_type {
+            urdf_rs::JointType::Revolute | urdf_rs::JointType::Continuous => {
+                let axis = Vec3::new(
+                    joint.axis.xyz[0] as f32,
+                    joint.axis.xyz[1] as f32,
+                    joint.axis.xyz[2] as f32,
+                );
+                let joint = RevoluteJointBuilder::new(axis).local_anchor2(Vec3::ZERO);
+                commands
+                    .entity(child_entity)
+                    .insert(ImpulseJoint::new(parent_entity, joint));
+            }
+            urdf_rs::JointType::Prismatic => {
+                let axis = Vec3::new(
+                    joint.axis.xyz[0] as f32,
+                    joint.axis.xyz[1] as f32,
+                    joint.axis.xyz[2] as f32,
+                );
+                let joint = PrismaticJointBuilder::new(axis).local_anchor2(Vec3::ZERO);
+                commands
+                    .entity(child_entity)
+                    .insert(ImpulseJoint::new(parent_entity, joint));
+            }
+            _ => {
+                warn!("Unsupported joint type: {:?}", joint.joint_type);
+                continue;
+            }
+        };
+    }
+
+    let root_link_name = &robot.links[0].name;
+    let root_link_entity = link_entities.get(root_link_name).unwrap();
+
     commands
         .spawn((
             Robot,
+            Name::new(robot.name.clone()),
             TransformBundle::from_transform(base_transform),
             VisibilityBundle::default(),
         ))
-        .with_children(|parent| {
-            for link in &robot.links {
-                for visual in &link.visual {
-                    parent.spawn((
-                        RobotPart,
-                        UrdfVisual {
-                            geometry: visual.geometry.clone(),
-                            material: visual.material.clone(),
-                            origin: visual.origin.clone(),
-                        },
-                        TransformBundle::default(),
-                        VisibilityBundle::default(),
-                    ));
-                }
+        .add_child(*root_link_entity);
 
-                for collision in &link.collision {
-                    parent.spawn((
-                        URDFCollision {
-                            geometry: collision.geometry.clone(),
-                            origin: collision.origin.clone(),
-                        },
-                        TransformBundle::default(),
-                        VisibilityBundle::default(),
-                    ));
-                }
-            }
-        });
+    for link in &robot.links {
+        let link_entity = link_entities.get(&link.name).unwrap();
+
+        for visual in &link.visual {
+            let visual_transform =
+                urdf_to_transform(&visual.origin, &Some(visual.geometry.clone()));
+
+            commands.entity(*link_entity).with_children(|parent| {
+                parent.spawn((
+                    UrdfVisual {
+                        geometry: visual.geometry.clone(),
+                        material: visual.material.clone(),
+                        origin: visual.origin.clone(),
+                    },
+                    TransformBundle::from_transform(visual_transform),
+                    VisibilityBundle::default(),
+                ));
+            });
+        }
+
+        for collision in &link.collision {
+            let collision_transform =
+                urdf_to_transform(&collision.origin, &Some(collision.geometry.clone()));
+
+            commands.entity(*link_entity).with_children(|parent| {
+                parent.spawn((
+                    URDFCollision {
+                        geometry: collision.geometry.clone(),
+                        origin: collision.origin.clone(),
+                    },
+                    TransformBundle::from_transform(collision_transform),
+                    VisibilityBundle::default(),
+                ));
+            });
+        }
+    }
 }
 
 fn process_urdf_visuals(
@@ -130,7 +221,7 @@ fn process_urdf_visuals(
             Geometry::Cylinder { radius, length } => {
                 let mesh = Mesh::from(Cylinder {
                     radius: *radius as f32,
-                    half_height: *length as f32,
+                    half_height: *length as f32 / 2.0,
                 });
                 let mesh_handle = meshes.add(mesh);
                 let material_handle = create_material(&urdf_visual.material, &mut materials);
@@ -145,19 +236,19 @@ fn process_urdf_visuals(
                 (mesh_handle, material_handle)
             }
             _ => {
-                warn!("Unsupported geometry type");
+                warn!("Unsupported geometry type: {:?}", urdf_visual.geometry);
                 continue;
             }
         };
 
-        let transform = urdf_to_transform(&urdf_visual.origin, &urdf_visual.geometry);
+        let transform = urdf_to_transform(&urdf_visual.origin, &Some(urdf_visual.geometry.clone()));
 
-        commands.entity(entity).insert((PbrBundle {
+        commands.entity(entity).insert(PbrBundle {
             mesh: mesh_handle,
             material: material_handle,
             transform,
             ..Default::default()
-        },));
+        });
     }
 }
 
@@ -167,8 +258,8 @@ fn process_urdf_collisions(
     query: Query<(Entity, &URDFCollision), Added<URDFCollision>>,
     asset_server: Res<AssetServer>,
 ) {
-    for (entity, urdf_visual) in query.iter() {
-        let mesh_handle = match &urdf_visual.geometry {
+    for (entity, urdf_collision) in query.iter() {
+        let mesh_handle = match &urdf_collision.geometry {
             Geometry::Mesh { filename, .. } => asset_server.load(filename),
             Geometry::Box { size } => {
                 let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
@@ -177,7 +268,7 @@ fn process_urdf_collisions(
             Geometry::Cylinder { radius, length } => {
                 let mesh = Mesh::from(Cylinder {
                     radius: *radius as f32,
-                    half_height: *length as f32,
+                    half_height: *length as f32 / 2.0,
                 });
                 meshes.add(mesh)
             }
@@ -188,12 +279,15 @@ fn process_urdf_collisions(
                 meshes.add(mesh)
             }
             _ => {
-                warn!("Unsupported geometry type");
+                warn!("Unsupported geometry type: {:?}", urdf_collision.geometry);
                 continue;
             }
         };
 
-        let transform = urdf_to_transform(&urdf_visual.origin, &urdf_visual.geometry);
+        let transform = urdf_to_transform(
+            &urdf_collision.origin,
+            &Some(urdf_collision.geometry.clone()),
+        );
 
         commands.entity(entity).insert((
             (
@@ -234,26 +328,22 @@ fn create_material(
     })
 }
 
-fn urdf_to_transform(origin: &Pose, geometry: &Geometry) -> Transform {
-    let mut pos = origin.xyz;
+fn urdf_to_transform(origin: &Pose, geometry: &Option<Geometry>) -> Transform {
+    let pos = origin.xyz;
     let rot = origin.rpy;
 
     let mut scale = Vec3::ONE;
 
-    if let Geometry::Mesh {
+    if let Some(Geometry::Mesh {
         scale: Some(mesh_scale),
         ..
-    } = geometry
+    }) = geometry
     {
         scale = Vec3::new(
             mesh_scale[0] as f32,
             mesh_scale[1] as f32,
             mesh_scale[2] as f32,
         );
-
-        pos[0] *= mesh_scale[0];
-        pos[1] *= mesh_scale[1];
-        pos[2] *= mesh_scale[2];
     }
 
     Transform {
@@ -261,4 +351,59 @@ fn urdf_to_transform(origin: &Pose, geometry: &Geometry) -> Transform {
         rotation: Quat::from_euler(EulerRot::XYZ, rot[0] as f32, rot[1] as f32, rot[2] as f32),
         scale,
     }
+}
+
+fn joint_control_ui(
+    mut contexts: EguiContexts,
+    mut query: Query<(&mut JointComponent, &mut ImpulseJoint)>,
+) {
+    use bevy_egui::egui::{self, Slider};
+
+    egui::Window::new("Joint Control").show(contexts.ctx_mut(), |ui| {
+        for (mut joint_component, mut impulse_joint) in query.iter_mut() {
+            ui.label(&joint_component.name);
+
+            let mut position = joint_component.current_position;
+
+            if joint_component.joint_type == urdf_rs::JointType::Revolute
+                || joint_component.joint_type == urdf_rs::JointType::Continuous
+            {
+                let response = ui.add(
+                    Slider::new(&mut position, -std::f32::consts::PI..=std::f32::consts::PI)
+                        .text("Angle"),
+                );
+                if response.changed() {
+                    joint_component.current_position = position;
+                    impulse_joint.data = TypedJoint::RevoluteJoint(
+                        RevoluteJointBuilder::new(Vec3::new(
+                            joint_component.axis[0] as f32,
+                            joint_component.axis[1] as f32,
+                            joint_component.axis[2] as f32,
+                        ))
+                        .local_anchor2(Vec3::ZERO)
+                        .build(),
+                    );
+                }
+            } else if joint_component.joint_type == urdf_rs::JointType::Prismatic {
+                let response = ui.add(Slider::new(&mut position, -1.0..=1.0).text("Position"));
+                if response.changed() {
+                    joint_component.current_position = position;
+                    impulse_joint.data = TypedJoint::PrismaticJoint(
+                        PrismaticJointBuilder::new(Vec3::new(
+                            joint_component.axis[0] as f32,
+                            joint_component.axis[1] as f32,
+                            joint_component.axis[2] as f32,
+                        ))
+                        .local_anchor2(Vec3::ZERO)
+                        .build(),
+                    );
+                }
+            } else {
+                ui.label(format!(
+                    "Unsupported joint type: {:?}",
+                    joint_component.joint_type
+                ));
+            }
+        }
+    });
 }
