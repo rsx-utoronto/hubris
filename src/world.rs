@@ -1,3 +1,4 @@
+use avian3d::prelude::*;
 use bevy::color;
 use bevy::prelude::*;
 
@@ -44,5 +45,6 @@ fn spawn_floor(
                 )),
                 ..Default::default()
             });
+            parent.spawn((RigidBody::Static, Collider::cylinder(100.0, 0.1)));
         });
 }
