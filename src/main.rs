@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_fps_counter::FpsCounterPlugin;
+use bevy_rapier3d::prelude::*;
 use urdf_rs::{Geometry, Pose};
 
 mod world;
@@ -16,8 +17,17 @@ fn main() {
             FpsCounterPlugin,
             WorldPlugin,
             CameraPlugin,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+            RapierDebugRenderPlugin::default(),
         ))
-        .add_systems(Startup, (spawn_robots, process_urdf_visuals).chain())
+        .add_systems(
+            Startup,
+            (
+                spawn_robots,
+                (process_urdf_visuals, process_urdf_collisions),
+            )
+                .chain(),
+        )
         .run();
 }
 
@@ -31,6 +41,12 @@ struct RobotPart;
 struct UrdfVisual {
     geometry: Geometry,
     material: Option<urdf_rs::Material>,
+    origin: Pose,
+}
+
+#[derive(Component)]
+struct URDFCollision {
+    geometry: Geometry,
     origin: Pose,
 }
 
@@ -71,6 +87,17 @@ fn spawn_robot(
                             geometry: visual.geometry.clone(),
                             material: visual.material.clone(),
                             origin: visual.origin.clone(),
+                        },
+                        TransformBundle::default(),
+                        VisibilityBundle::default(),
+                    ));
+                }
+
+                for collision in &link.collision {
+                    parent.spawn((
+                        URDFCollision {
+                            geometry: collision.geometry.clone(),
+                            origin: collision.origin.clone(),
                         },
                         TransformBundle::default(),
                         VisibilityBundle::default(),
@@ -125,12 +152,59 @@ fn process_urdf_visuals(
 
         let transform = urdf_to_transform(&urdf_visual.origin, &urdf_visual.geometry);
 
-        commands.entity(entity).insert(PbrBundle {
+        commands.entity(entity).insert((PbrBundle {
             mesh: mesh_handle,
             material: material_handle,
             transform,
             ..Default::default()
-        });
+        },));
+    }
+}
+
+fn process_urdf_collisions(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    query: Query<(Entity, &URDFCollision), Added<URDFCollision>>,
+    asset_server: Res<AssetServer>,
+) {
+    for (entity, urdf_visual) in query.iter() {
+        let mesh_handle = match &urdf_visual.geometry {
+            Geometry::Mesh { filename, .. } => asset_server.load(filename),
+            Geometry::Box { size } => {
+                let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
+                meshes.add(mesh)
+            }
+            Geometry::Cylinder { radius, length } => {
+                let mesh = Mesh::from(Cylinder {
+                    radius: *radius as f32,
+                    half_height: *length as f32,
+                });
+                meshes.add(mesh)
+            }
+            Geometry::Sphere { radius } => {
+                let mesh = Mesh::from(Sphere {
+                    radius: *radius as f32,
+                });
+                meshes.add(mesh)
+            }
+            _ => {
+                warn!("Unsupported geometry type");
+                continue;
+            }
+        };
+
+        let transform = urdf_to_transform(&urdf_visual.origin, &urdf_visual.geometry);
+
+        commands.entity(entity).insert((
+            (
+                AsyncCollider(ComputedColliderShape::ConvexDecomposition(
+                    VHACDParameters::default(),
+                )),
+                RigidBody::Fixed,
+            ),
+            mesh_handle,
+            transform,
+        ));
     }
 }
 
@@ -155,6 +229,7 @@ fn create_material(
 
     materials.add(StandardMaterial {
         base_color: color,
+        metallic: 0.7,
         ..Default::default()
     })
 }
