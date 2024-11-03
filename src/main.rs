@@ -1,3 +1,4 @@
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_fps_counter::FpsCounterPlugin;
 use urdf_rs::{Geometry, Pose};
@@ -16,6 +17,8 @@ fn main() {
             FpsCounterPlugin,
             WorldPlugin,
             CameraPlugin,
+            PhysicsPlugins::default(),
+            PhysicsDebugPlugin::default(),
         ))
         .add_systems(Startup, (spawn_robots, process_urdf_visuals).chain())
         .run();
