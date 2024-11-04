@@ -1,6 +1,5 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin};
 use bevy_fps_counter::FpsCounterPlugin;
 use std::collections::HashMap;
 use urdf_rs::{Geometry, Pose};
@@ -21,252 +20,243 @@ fn main() {
             CameraPlugin,
             PhysicsPlugins::default(),
             PhysicsDebugPlugin::default(),
-            EguiPlugin,
         ))
-        .add_systems(
-            Startup,
-            (
-                spawn_robots,
-                (process_urdf_visuals, process_urdf_collisions),
-            )
-                .chain(),
+        .insert_gizmo_config(
+            PhysicsGizmos {
+                axis_lengths: None,
+                ..default()
+            },
+            GizmoConfig::default(),
         )
-        .add_systems(Update, joint_control_ui)
+        .insert_resource(SubstepCount(200))
+        .add_systems(Startup, spawn_robots)
+        .add_systems(Update, (apply_joint_torque_system, collision_callback))
         .run();
 }
 
-#[derive(Component)]
-struct Robot;
-
-#[derive(Component)]
-struct RobotPart;
-
-#[derive(Component)]
-struct UrdfVisual {
-    link_name: String,
-    geometry: Geometry,
-    material: Option<urdf_rs::Material>,
-    origin: Pose,
-}
-
-#[derive(Component)]
-struct URDFCollision {
-    link_name: String,
-    geometry: Geometry,
-    origin: Pose,
-}
-
-#[derive(Component)]
-struct JointComponent {
-    name: String,
-    joint_type: urdf_rs::JointType,
-    axis: [f64; 3],
-    current_position: f32,
-}
-
-fn spawn_robots(mut commands: Commands) {
+fn spawn_robots(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     spawn_robot(
-        &mut commands,
         Transform {
             translation: Vec3::new(0.0, 0.0, 0.0),
             rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
             scale: Vec3::ONE,
         },
+        &mut commands,
+        &mut meshes,
+        &asset_server,
+        &mut materials,
+    );
+    spawn_robot(
+        Transform {
+            translation: Vec3::new(0.0, 10.0, 0.0),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        },
+        &mut commands,
+        &mut meshes,
+        &asset_server,
+        &mut materials,
     );
 }
 
-fn spawn_robot(commands: &mut Commands, base_transform: Transform) {
+fn spawn_robot(
+    base_transform: Transform,
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    asset_server: &Res<AssetServer>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
     let urdf_path = "sample_description/urdf/low_cost_robot.urdf";
     let robot = urdf_rs::read_file(urdf_path).expect("Failed to read URDF file");
 
     let mut link_entities = HashMap::new();
+    let mut link_transforms = HashMap::new();
 
     for link in &robot.links {
-        let entity = commands
-            .spawn((
-                RobotPart,
-                Name::new(link.name.clone()),
-                TransformBundle::default(),
-                VisibilityBundle::default(),
-            ))
-            .id();
+        let initial_transform = if link.name == "base_link" {
+            base_transform
+        } else {
+            Transform::IDENTITY
+        };
 
-        link_entities.insert(link.name.clone(), entity);
-    }
+        let mass_properties = link_to_mass_properties(link);
 
-    for joint in &robot.joints {
-        let parent_link_name = &joint.parent.link;
-        let child_link_name = &joint.child.link;
-
-        let parent_entity = link_entities.get(parent_link_name).unwrap();
-        let child_entity = link_entities.get(child_link_name).unwrap();
-
-        let joint_origin_transform = urdf_to_transform(&joint.origin, &None);
-
-        commands.entity(*child_entity).insert((
-            JointComponent {
-                name: joint.name.clone(),
-                joint_type: joint.joint_type.clone(),
-                axis: *joint.axis.xyz,
-                current_position: 0.0,
-            },
-            TransformBundle::from_transform(Transform::IDENTITY),
-        ));
-
-        let joint_entity = commands
-            .spawn((
-                Name::new(format!("Joint: {}", joint.name)),
-                TransformBundle::from_transform(joint_origin_transform),
-                VisibilityBundle::default(),
-            ))
-            .id();
-
-        commands.entity(joint_entity).add_child(*child_entity);
-        commands.entity(*parent_entity).add_child(joint_entity);
-    }
-
-    let root_link_name = &robot.links[0].name;
-    let root_link_entity = link_entities.get(root_link_name).unwrap();
-
-    commands
-        .spawn((
-            Robot,
-            Name::new(robot.name.clone()),
-            TransformBundle::from_transform(Transform::IDENTITY),
-            VisibilityBundle::default(),
-        ))
-        .add_child(*root_link_entity);
-
-    commands
-        .entity(*root_link_entity)
-        .insert(TransformBundle::from_transform(base_transform));
-
-    for link in &robot.links {
-        let link_entity = link_entities.get(&link.name).unwrap();
+        let link_entity = match link.name.as_str() {
+            "base_link" => commands.spawn((
+                initial_transform,
+                RigidBody::Kinematic,
+                Restitution::ZERO,
+                mass_properties,
+                InheritedVisibility::VISIBLE,
+                GlobalTransform::IDENTITY,
+            )),
+            _ => commands.spawn((
+                initial_transform,
+                RigidBody::Dynamic,
+                Restitution::ZERO,
+                mass_properties,
+                InheritedVisibility::VISIBLE,
+                GlobalTransform::IDENTITY,
+            )),
+        };
+        let link_entity_id = link_entity.id();
+        link_entities.insert(link.name.clone(), link_entity_id);
+        link_transforms.insert(link.name.clone(), initial_transform);
 
         for visual in &link.visual {
-            commands.entity(*link_entity).with_children(|parent| {
-                parent.spawn((UrdfVisual {
-                    link_name: link.name.clone(),
-                    geometry: visual.geometry.clone(),
-                    material: visual.material.clone(),
-                    origin: visual.origin.clone(),
+            let (mesh_handle, material_handle) =
+                visual_to_mesh_and_material(visual, meshes, asset_server, materials);
+            let transform = urdf_to_transform(&visual.origin, &Some(visual.geometry.clone()));
+
+            commands.entity(link_entity_id).with_children(|parent| {
+                parent.spawn((PbrBundle {
+                    mesh: mesh_handle,
+                    material: material_handle,
+                    transform,
+                    ..Default::default()
                 },));
             });
         }
 
         for collision in &link.collision {
-            commands.entity(*link_entity).with_children(|parent| {
-                parent.spawn((URDFCollision {
-                    link_name: link.name.clone(),
-                    geometry: collision.geometry.clone(),
-                    origin: collision.origin.clone(),
-                },));
+            let mesh_handle = collision_to_mesh(collision, meshes, asset_server);
+            let transform = urdf_to_transform(&collision.origin, &Some(collision.geometry.clone()));
+
+            commands.entity(link_entity_id).with_children(|parent| {
+                parent.spawn((
+                    mesh_handle,
+                    transform,
+                    ColliderConstructor::ConvexDecompositionFromMesh,
+                ));
             });
+        }
+    }
+
+    for joint in &robot.joints {
+        let parent_link_name = &joint.parent.link;
+        let child_link_name = &joint.child.link;
+        let joint_transform = urdf_to_transform(&joint.origin, &None);
+
+        if let (Some(parent_entity), Some(child_entity)) = (
+            link_entities.get(parent_link_name),
+            link_entities.get(child_link_name),
+        ) {
+            if let Some(parent_transform) = link_transforms.get(parent_link_name) {
+                let accumulated_transform = *parent_transform * joint_transform;
+                link_transforms.insert(child_link_name.clone(), accumulated_transform);
+
+                commands.entity(*child_entity).insert(accumulated_transform);
+            }
+
+            urdf_to_joint(commands, *parent_entity, *child_entity, joint);
         }
     }
 }
 
-fn process_urdf_visuals(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    query: Query<(Entity, &UrdfVisual), Added<UrdfVisual>>,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    for (entity, urdf_visual) in query.iter() {
-        let (mesh_handle, material_handle) = match &urdf_visual.geometry {
-            Geometry::Mesh { filename, .. } => {
-                let mesh_handle = asset_server.load(filename);
-                let material_handle = create_material(&urdf_visual.material, &mut materials);
-                (mesh_handle, material_handle)
-            }
-            Geometry::Box { size } => {
-                let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
-                let mesh_handle = meshes.add(mesh);
-                let material_handle = create_material(&urdf_visual.material, &mut materials);
-                (mesh_handle, material_handle)
-            }
-            Geometry::Cylinder { radius, length } => {
-                let mesh = Mesh::from(Cylinder {
-                    radius: *radius as f32,
-                    half_height: (*length as f32) / 2.0,
-                });
-                let mesh_handle = meshes.add(mesh);
-                let material_handle = create_material(&urdf_visual.material, &mut materials);
-                (mesh_handle, material_handle)
-            }
-            Geometry::Sphere { radius } => {
-                let mesh = Mesh::from(Sphere {
-                    radius: *radius as f32,
-                });
-                let mesh_handle = meshes.add(mesh);
-                let material_handle = create_material(&urdf_visual.material, &mut materials);
-                (mesh_handle, material_handle)
-            }
-            _ => {
-                warn!("Unsupported geometry type: {:?}", urdf_visual.geometry);
-                continue;
-            }
-        };
-
-        let transform = urdf_to_transform(&urdf_visual.origin, &Some(urdf_visual.geometry.clone()));
-
-        commands.entity(entity).insert((PbrBundle {
-            mesh: mesh_handle,
-            material: material_handle,
-            transform,
-            ..Default::default()
-        },));
+fn link_to_mass_properties(link: &urdf_rs::Link) -> MassPropertiesBundle {
+    MassPropertiesBundle {
+        mass: Mass(link.inertial.mass.value as f32),
+        inertia: Inertia(avian3d::math::Matrix3 {
+            x_axis: Vec3::new(
+                link.inertial.inertia.ixx as f32,
+                link.inertial.inertia.ixy as f32,
+                link.inertial.inertia.ixz as f32,
+            ),
+            y_axis: Vec3::new(
+                link.inertial.inertia.ixy as f32,
+                link.inertial.inertia.iyy as f32,
+                link.inertial.inertia.iyz as f32,
+            ),
+            z_axis: Vec3::new(
+                link.inertial.inertia.ixz as f32,
+                link.inertial.inertia.iyz as f32,
+                link.inertial.inertia.izz as f32,
+            ),
+        }),
+        center_of_mass: CenterOfMass(Vec3::new(
+            link.inertial.origin.xyz[0] as f32,
+            link.inertial.origin.xyz[1] as f32,
+            link.inertial.origin.xyz[2] as f32,
+        )),
+        ..Default::default()
     }
 }
 
-fn process_urdf_collisions(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    query: Query<(Entity, &URDFCollision), Added<URDFCollision>>,
-    asset_server: Res<AssetServer>,
-) {
-    for (entity, urdf_collision) in query.iter() {
-        let mesh_handle = match &urdf_collision.geometry {
-            Geometry::Mesh { filename, .. } => asset_server.load(filename),
-            Geometry::Box { size } => {
-                let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
-                meshes.add(mesh)
-            }
-            Geometry::Cylinder { radius, length } => {
-                let mesh = Mesh::from(Cylinder {
-                    radius: *radius as f32,
-                    half_height: (*length as f32) / 2.0,
-                });
-                meshes.add(mesh)
-            }
-            Geometry::Sphere { radius } => {
-                let mesh = Mesh::from(Sphere {
-                    radius: *radius as f32,
-                });
-                meshes.add(mesh)
-            }
-            _ => {
-                warn!("Unsupported geometry type: {:?}", urdf_collision.geometry);
-                continue;
-            }
-        };
+fn visual_to_mesh_and_material(
+    visual: &urdf_rs::Visual,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    asset_server: &Res<AssetServer>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+    match &visual.geometry {
+        Geometry::Mesh { filename, .. } => {
+            let mesh_handle = asset_server.load(filename);
+            let material_handle = create_material(&visual.material, materials);
+            (mesh_handle, material_handle)
+        }
+        Geometry::Box { size } => {
+            let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
+            let mesh_handle = meshes.add(mesh);
+            let material_handle = create_material(&visual.material, materials);
+            (mesh_handle, material_handle)
+        }
+        Geometry::Cylinder { radius, length } => {
+            let mesh = Mesh::from(Cylinder {
+                radius: *radius as f32,
+                half_height: (*length as f32) / 2.0,
+            });
+            let mesh_handle = meshes.add(mesh);
+            let material_handle = create_material(&visual.material, materials);
+            (mesh_handle, material_handle)
+        }
+        Geometry::Sphere { radius } => {
+            let mesh = Mesh::from(Sphere {
+                radius: *radius as f32,
+            });
+            let mesh_handle = meshes.add(mesh);
+            let material_handle = create_material(&visual.material, materials);
+            (mesh_handle, material_handle)
+        }
+        _ => {
+            warn!("Unsupported geometry type: {:?}", visual.geometry);
+            (Handle::default(), Handle::default())
+        }
+    }
+}
 
-        let transform = urdf_to_transform(
-            &urdf_collision.origin,
-            &Some(urdf_collision.geometry.clone()),
-        );
-        let body_type = match urdf_collision.link_name.as_str() {
-            "base_link" => RigidBody::Static,
-            _ => RigidBody::Kinematic,
-        };
-
-        commands.entity(entity).insert((
-            (ColliderConstructor::ConvexDecompositionFromMesh, body_type),
-            mesh_handle,
-            transform,
-        ));
+fn collision_to_mesh(
+    collision: &urdf_rs::Collision,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    asset_server: &Res<AssetServer>,
+) -> Handle<Mesh> {
+    match &collision.geometry {
+        Geometry::Mesh { filename, .. } => asset_server.load(filename),
+        Geometry::Box { size } => {
+            let mesh = Mesh::from(Cuboid::new(size[0] as f32, size[1] as f32, size[2] as f32));
+            meshes.add(mesh)
+        }
+        Geometry::Cylinder { radius, length } => {
+            let mesh = Mesh::from(Cylinder {
+                radius: *radius as f32,
+                half_height: (*length as f32) / 2.0,
+            });
+            meshes.add(mesh)
+        }
+        Geometry::Sphere { radius } => {
+            let mesh = Mesh::from(Sphere {
+                radius: *radius as f32,
+            });
+            meshes.add(mesh)
+        }
+        _ => {
+            warn!("Unsupported geometry type: {:?}", collision.geometry);
+            Handle::default()
+        }
     }
 }
 
@@ -275,7 +265,10 @@ fn create_material(
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Handle<StandardMaterial> {
     let color = if let Some(material) = urdf_material {
-        if let Some(urdf_color) = &material.color {
+        if let Some(urdf_texture) = &material.texture {
+            warn!("Textures are not supported yet: {:?}", urdf_texture);
+            Color::srgba(0.8, 0.8, 0.8, 1.0)
+        } else if let Some(urdf_color) = &material.color {
             Color::srgba(
                 urdf_color.rgba[0] as f32,
                 urdf_color.rgba[1] as f32,
@@ -291,7 +284,7 @@ fn create_material(
 
     materials.add(StandardMaterial {
         base_color: color,
-        metallic: 0.7,
+        metallic: 1.0,
         ..Default::default()
     })
 }
@@ -321,59 +314,77 @@ fn urdf_to_transform(origin: &Pose, geometry: &Option<Geometry>) -> Transform {
     }
 }
 
-fn joint_control_ui(
-    mut contexts: EguiContexts,
-    mut query: Query<(&mut JointComponent, &mut Transform)>,
+fn urdf_to_joint(
+    commands: &mut Commands,
+    entity1: Entity,
+    entity2: Entity,
+    joint: &urdf_rs::Joint,
 ) {
-    use bevy_egui::egui::{self, Slider};
-
-    egui::Window::new("Joint Control").show(contexts.ctx_mut(), |ui| {
-        for (mut joint_component, mut transform) in query.iter_mut() {
-            ui.label(&joint_component.name);
-
-            let mut position = joint_component.current_position;
-
-            if joint_component.joint_type == urdf_rs::JointType::Revolute
-                || joint_component.joint_type == urdf_rs::JointType::Continuous
-            {
-                let response = ui.add(
-                    Slider::new(&mut position, -std::f32::consts::PI..=std::f32::consts::PI)
-                        .text("Angle"),
-                );
-                if response.changed() {
-                    joint_component.current_position = position;
-
-                    let axis = Vec3::new(
-                        joint_component.axis[0] as f32,
-                        joint_component.axis[1] as f32,
-                        joint_component.axis[2] as f32,
-                    );
-
-                    let rotation = Quat::from_axis_angle(axis.normalize(), position);
-
-                    transform.rotation = rotation;
-                }
-            } else if joint_component.joint_type == urdf_rs::JointType::Prismatic {
-                let response = ui.add(Slider::new(&mut position, -1.0..=1.0).text("Position"));
-                if response.changed() {
-                    joint_component.current_position = position;
-
-                    let axis = Vec3::new(
-                        joint_component.axis[0] as f32,
-                        joint_component.axis[1] as f32,
-                        joint_component.axis[2] as f32,
-                    );
-
-                    let translation = axis.normalize() * position;
-
-                    transform.translation = translation;
-                }
-            } else {
-                ui.label(format!(
-                    "Unsupported joint type: {:?}",
-                    joint_component.joint_type
-                ));
-            }
-        }
+    let dynamics = joint.dynamics.clone().unwrap_or(urdf_rs::Dynamics {
+        damping: 10000.0,
+        friction: 0.0,
     });
+
+    let axis = Vec3::new(
+        joint.axis.xyz[0] as f32,
+        joint.axis.xyz[1] as f32,
+        joint.axis.xyz[2] as f32,
+    );
+
+    let anchor = Vec3::new(
+        joint.origin.xyz[0] as f32,
+        joint.origin.xyz[1] as f32,
+        joint.origin.xyz[2] as f32,
+    );
+
+    match joint.joint_type {
+        urdf_rs::JointType::Revolute => {
+            let joint = RevoluteJoint::new(entity1, entity2)
+                .with_aligned_axis(axis)
+                .with_angular_velocity_damping(dynamics.damping as f32)
+                .with_compliance(0.0)
+                .with_angle_limits(joint.limit.lower as f32, joint.limit.upper as f32);
+
+            commands.spawn(joint);
+        }
+        urdf_rs::JointType::Continuous => {
+            let joint = RevoluteJoint::new(entity1, entity2)
+                .with_aligned_axis(axis)
+                .with_local_anchor_1(anchor)
+                .with_angular_velocity_damping(dynamics.damping as f32)
+                .with_compliance(0.0);
+
+            commands.spawn(joint);
+        }
+        urdf_rs::JointType::Fixed => {
+            let joint = FixedJoint::new(entity1, entity2);
+
+            commands.spawn(joint);
+        }
+        _ => {
+            error!("Unsupported joint type: {:?}", joint.joint_type);
+        }
+    }
+}
+
+fn apply_joint_torque_system(mut joint_query: Query<&mut RevoluteJoint>) {
+    for joint in joint_query.iter_mut() {
+        let _child = joint.entity1;
+        let _parent = joint.entity2;
+    }
+}
+
+fn collision_callback(mut collisions: ResMut<Collisions>) {
+    collisions.retain(ignore_collision(0.01));
+}
+
+fn ignore_collision(ignore_threshold: f32) -> impl Fn(&mut Contacts) -> bool {
+    move |contacts: &mut Contacts| {
+        contacts.manifolds.iter().all(|manifold| {
+            manifold
+                .contacts
+                .iter()
+                .all(|contact| contact.penetration >= ignore_threshold)
+        })
+    }
 }
