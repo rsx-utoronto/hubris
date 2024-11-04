@@ -8,9 +8,10 @@ impl Plugin for CameraPlugin {
         app.add_plugins(NoCameraPlayerPlugin)
             .insert_resource(MovementSettings {
                 sensitivity: 0.0002,
-                speed: 2.0,
+                speed: 1.0,
             })
-            .add_systems(Startup, spawn_camera);
+            .add_systems(Startup, spawn_camera)
+            .add_systems(Update, flycam_speed);
     }
 }
 
@@ -25,4 +26,12 @@ fn spawn_camera(mut commands: Commands) {
     );
 
     commands.spawn(camera);
+}
+
+fn flycam_speed(keys: Res<ButtonInput<KeyCode>>, mut flycam: ResMut<MovementSettings>) {
+    if keys.pressed(KeyCode::ControlLeft) {
+        flycam.speed = 3.0;
+    } else {
+        flycam.speed = 0.5;
+    }
 }
