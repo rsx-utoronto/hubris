@@ -205,7 +205,7 @@ fn process_urdf_visuals(
                 (mesh_handle, material_handle)
             }
             _ => {
-                warn!("Unsupported geometry type");
+                warn!("Unsupported geometry type: {:?}", urdf_visual.geometry);
                 continue;
             }
         };
@@ -248,7 +248,7 @@ fn process_urdf_collisions(
                 meshes.add(mesh)
             }
             _ => {
-                warn!("Unsupported geometry type");
+                warn!("Unsupported geometry type: {:?}", urdf_collision.geometry);
                 continue;
             }
         };
@@ -369,7 +369,10 @@ fn joint_control_ui(
                     transform.translation = translation;
                 }
             } else {
-                ui.label("Unsupported joint type");
+                ui.label(format!(
+                    "Unsupported joint type: {:?}",
+                    joint_component.joint_type
+                ));
             }
         }
     });
